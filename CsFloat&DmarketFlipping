@@ -1,0 +1,163 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Friday Nov 10 2023
+
+@author: KoiFish0
+
+Github Repo: https://github.com/KoiFish0/Steam-Data-Scraping-Tools
+
+
+This code is made available with the CC BY-NC-SA 4.0 license 
+https://creativecommons.org/licenses/by-nc-sa/4.0/
+"""
+import requests
+import time
+import nacl.signing
+import binascii
+from decimal import Decimal, ROUND_HALF_UP
+
+# Fill in your public and private keys for Dmarket here
+public_key = '<PUBLIC-KEY>'
+private_key = '<PRIVATE-KEY>' # Make sure to remove the last half of the private key which is identical to the public key
+
+session = requests.Session()
+
+# Generate the timestamp for the X-Sign-Date header
+timestamp = str(int(time.time()))
+
+# Create the string to sign
+method = 'GET'
+route_path = '/exchange/v1/market/items'
+http_query_params = 'currency=USD&limit=10'  # Initialize with sample data
+body_string = ''
+to_sign = f"{method}{route_path}{http_query_params}{body_string}{timestamp}"
+
+# Sign the string using the private key
+signing_key = nacl.signing.SigningKey(binascii.unhexlify(private_key))
+signed = signing_key.sign(to_sign.encode(), encoder=nacl.encoding.HexEncoder)
+
+# Encode the result string with hex
+signature = signed.signature.decode()
+
+# Set the headers
+headers = {
+    'X-Api-Key': public_key,
+    'X-Sign-Date': timestamp,
+    'X-Request-Sign': signature,
+    'accept': 'application/json'
+}
+
+items_to_scrape = 50  # Number of items scraped through both APIs
+
+# Set the initial cursor value to None
+cursor = None
+
+# Initialize printed_items
+printed_items = []
+
+print("========================")
+
+# Loop through the items
+for i in range(items_to_scrape):
+    time.sleep(2)  # If you make requests too fast Csfloat will get mad
+    url = 'https://api.dmarket.com/exchange/v1/market/items'
+    query_params = {
+        'gameId': 'a8db',  # CS2 - a8db | Team Fortress 2 - tf2 | Dota 2 - 9a92 | Rust - rust
+        'limit': 1,  # Items to search through per iteration
+        'offset': 0,
+        'orderBy': 'best_deal',
+        'orderDir': 'asc',
+        'currency': 'USD',  # Select your currency
+        'priceFrom': 0,  # Prices are in cents/pence
+        'priceTo': 2000
+    }
+
+    # Add the cursor to the query parameters if it exists
+    if cursor:
+        query_params['cursor'] = cursor
+
+    response = session.get(url, params=query_params, headers=headers)
+
+    if response.status_code == 200:
+        dmarket_data = response.json()
+        for dmarket_item in dmarket_data['objects']:
+            dmarket_item_name = dmarket_item['extra']['name']
+            exterior = dmarket_item['extra'].get('exterior')
+
+            # Extract the cursor value from the dmarket data
+            cursor = dmarket_data.get('cursor')
+
+            if exterior is not None:
+                formatted_exterior = exterior.lower().replace("-", " ").title()
+                dmarket_item_name = f"{dmarket_item_name} ({formatted_exterior})"
+
+            url = "https://csfloat.com/api/v1/listings"
+            query_params = {
+                "limit": 1,
+                "sort_by": "best_deal",
+                "category": 0,
+                "market_hash_name": dmarket_item_name
+            }
+
+            headers = {"Authorization": "<CSFLOAT-API-KEY>"}  # Replace <CSFLOAT-API-KEY> with the actual API key for CsFloat
+            csfloat_response = session.get(url, params=query_params, headers=headers)
+
+            # Check the status code to ensure the request was successful
+            if csfloat_response.status_code == 200:
+                csfloat_data = csfloat_response.json()
+                # Process the data
+                for item in csfloat_data:
+                    dmarket_price = int(dmarket_item['price']['USD']) / 100 if 'price' in dmarket_item and 'USD' in dmarket_item['price'] and dmarket_item['price']['USD'] != "" else None
+                    csfloat_price = int(item.get('price')) / 100
+                    wear_name = item.get('wear_name')
+
+                    # Calculate DMarket and CSFloat prices with fees and round them to avoid floating-point precision issues
+                    dmarket_price_with_fee = round(dmarket_price * 0.95, 2)  # 1 - Fee percentage / 100 when applying the fee
+                    csfloat_price_with_fee = round(csfloat_price * 0.98, 2)
+
+                    # Round the prices with fees to avoid floating-point precision issues
+                    dmarket_price_with_fee = round(dmarket_price_with_fee, 2)
+                    csfloat_price_with_fee = round(csfloat_price_with_fee, 2)
+
+                    # Calculate the price differences as decimal
+                    dmarket_price_difference = Decimal(csfloat_price_with_fee) - Decimal(dmarket_price)
+                    csfloat_price_difference = Decimal(dmarket_price_with_fee) - Decimal(csfloat_price)
+
+                    # Ensure the fee subtracts at least $0.01
+                    dmarket_price_difference -= Decimal('0.01')
+                    csfloat_price_difference -= Decimal('0.01')
+
+                    # Quantize the price differences
+                    dmarket_price_difference = dmarket_price_difference.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                    csfloat_price_difference = csfloat_price_difference.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+                    # Check if the price difference is above 0 for DMarket
+                    if dmarket_price_difference > 0:
+                        if dmarket_item_name not in printed_items:
+                            printed_items.append(dmarket_item_name)
+                            print(f"Item: {dmarket_item_name}")
+                            print(f"Dmarket Price: ${dmarket_price}")  # Replace $ with your currency
+                            print(f"CSFloat Price: ${csfloat_price}")
+                            if wear_name is not None:
+                                print(f"Wear: {wear_name}")
+                            print(f"Price Difference With Fee: ${dmarket_price_difference}")
+                            print("========================")
+
+                    # Check if the price difference is above 0 for CSFloat
+                    elif csfloat_price_difference > 0:
+                        if dmarket_item_name not in printed_items:
+                            printed_items.append(dmarket_item_name)
+                            print(f"Item: {dmarket_item_name}")
+                            print(f"Dmarket Price: ${dmarket_price}")
+                            print(f"CSFloat Price: ${csfloat_price}")
+                            if wear_name is not None:
+                                print(f"Wear: {wear_name}")
+                            print(f"Price Difference With Fee: ${csfloat_price_difference}")
+                            print("========================")
+
+            else:
+                print(f"CsFloat request failed with status code {csfloat_response.status_code}")
+
+    else:
+        print(f"DMarket request failed with status code {response.status_code}")
+        print(f"Response
